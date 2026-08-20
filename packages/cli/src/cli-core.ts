@@ -234,6 +234,9 @@ export async function runMakaCli(
           : {}),
         ...(command.websocketPort === undefined ? {} : { websocketPort: command.websocketPort }),
         ...(command.websocketPath ? { websocketPath: command.websocketPath } : {}),
+        ...(command.expectedServiceId ? { expectedServiceId: command.expectedServiceId } : {}),
+        ...(command.expectedRootPath ? { expectedRootPath: command.expectedRootPath } : {}),
+        ...(command.expectedRootId ? { expectedRootId: command.expectedRootId } : {}),
       });
     }
     case 'runtime-host-service-manage': {
@@ -254,6 +257,9 @@ export async function runMakaCli(
           : {}),
         ...(command.websocketPort === undefined ? {} : { websocketPort: command.websocketPort }),
         ...(command.websocketPath ? { websocketPath: command.websocketPath } : {}),
+        ...(command.expectedServiceId ? { expectedServiceId: command.expectedServiceId } : {}),
+        ...(command.expectedRootPath ? { expectedRootPath: command.expectedRootPath } : {}),
+        ...(command.expectedRootId ? { expectedRootId: command.expectedRootId } : {}),
       });
     }
     case 'runtime-host-access-issue': {

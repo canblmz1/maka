@@ -338,6 +338,7 @@ export interface DesktopRuntimeHostOnboardingInput {
   readonly name?: string;
   readonly destination: string;
   readonly sshPort?: number;
+  readonly repairProfileId?: string;
 }
 
 export type DesktopRuntimeHostOnboardingPhase =
@@ -363,9 +364,9 @@ export type DesktopRuntimeHostOnboardingSnapshot =
       readonly profileId: string;
     };
 
-export type DesktopRuntimeHostManagementAction = Exclude<
+export type DesktopRuntimeHostManagementAction = Extract<
   RuntimeHostServiceManagementAction,
-  'install'
+  'status' | 'start' | 'restart' | 'logs' | 'uninstall'
 >;
 
 export type DesktopRuntimeHostManagementResult = Extract<
@@ -374,26 +375,6 @@ export type DesktopRuntimeHostManagementResult = Extract<
 >;
 
 export type DesktopRuntimeHostManagementResponse = RuntimeHostServiceManagementFrame;
-
-export type DesktopRuntimeHostManagementSnapshot =
-  | {
-      readonly kind: 'unavailable';
-      readonly profileId: string;
-      readonly profileName: string;
-      readonly reason: 'ssh_required';
-    }
-  | {
-      readonly kind: 'failed';
-      readonly profileId: string;
-      readonly profileName: string;
-      readonly error: Extract<RuntimeHostServiceManagementFrame, { kind: 'error' }>['error'];
-    }
-  | {
-      readonly kind: 'available';
-      readonly profileId: string;
-      readonly profileName: string;
-      readonly result: DesktopRuntimeHostManagementResult;
-    };
 
 export interface DesktopProjectCapabilities {
   readonly chooseClientDirectory: boolean;
@@ -493,7 +474,6 @@ export interface MakaBridge {
   };
 
   runtimeHostManagement: {
-    getStatus(profileId: string): Promise<DesktopRuntimeHostManagementSnapshot>;
     run(
       profileId: string,
       action: DesktopRuntimeHostManagementAction,

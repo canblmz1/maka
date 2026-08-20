@@ -365,11 +365,13 @@ export function RuntimeHostProfilesSection(props: {
                       label={copy.moreActions(profile.name)}
                       size="sm"
                       items={[
-                        {
-                          label: copy.manage,
-                          isDisabled: switching,
-                          onClick: () => setManagedProfile(profile),
-                        },
+                        ...(profile.transport.kind === "ssh" && profile.managedService
+                          ? [{
+                              label: copy.manage,
+                              isDisabled: switching,
+                              onClick: () => setManagedProfile(profile),
+                            }]
+                          : []),
                         {
                           label: copy.remove,
                           isDisabled:
@@ -410,6 +412,7 @@ export function RuntimeHostProfilesSection(props: {
             ...(profile.transport.sshPort === undefined
               ? {}
               : { sshPort: profile.transport.sshPort }),
+            repairProfileId: profile.id,
           });
           setShowOnboarding(true);
         }}
