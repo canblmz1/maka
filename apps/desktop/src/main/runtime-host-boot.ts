@@ -124,6 +124,7 @@ import {
   type DesktopRuntimeHostSetupPackage,
 } from "./runtime-host-ssh-terminal.js";
 import { createDesktopRuntimeHostOnboarding } from "./runtime-host-onboarding.js";
+import { createDesktopRuntimeHostManagement } from "./runtime-host-management.js";
 import { registerRuntimeHostOAuthIpc } from "./runtime-host-oauth-ipc-main.js";
 import { RuntimeHostOAuthPresentation } from "./runtime-host-oauth-presentation.js";
 import { registerRuntimeHostPermissionsIpc } from "./runtime-host-permissions-ipc-main.js";
@@ -324,6 +325,13 @@ const runtimeHostOnboarding = createDesktopRuntimeHostOnboarding({
   resolveSetupPackage: runtimeHostSetupPackage,
   send: (snapshot) =>
     mainWindowController.send("runtime-host-onboarding:changed", snapshot),
+});
+const runtimeHostManagement = createDesktopRuntimeHostManagement({
+  ipcMain,
+  clientInstanceId: runtimeHostClientInstanceId,
+  profiles: runtimeHostProfileService,
+  runServiceManagement: runtimeHostSshTerminal.runServiceManagement,
+  setupPackage: runtimeHostSetupPackage(),
 });
 
 function runtimeHostSetupPackage(): DesktopRuntimeHostSetupPackage {
@@ -1365,6 +1373,7 @@ async function closeRuntimeHostDesktop(): Promise<void> {
   settingsBotsIpc?.dispose();
   permissionOverlay.dismiss();
   const results = await Promise.allSettled([
+    Promise.resolve().then(() => runtimeHostManagement.close()),
     runtimeHostManager?.close(),
     runtimeHostOnboarding.close(),
     runtimeHostSshTerminal.close(),
