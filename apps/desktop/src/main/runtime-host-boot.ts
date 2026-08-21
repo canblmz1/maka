@@ -328,10 +328,8 @@ const runtimeHostOnboarding = createDesktopRuntimeHostOnboarding({
 });
 const runtimeHostManagement = createDesktopRuntimeHostManagement({
   ipcMain,
-  clientInstanceId: runtimeHostClientInstanceId,
   profiles: runtimeHostProfileService,
   runServiceManagement: runtimeHostSshTerminal.runServiceManagement,
-  setupPackage: runtimeHostSetupPackage(),
 });
 
 function runtimeHostSetupPackage(): DesktopRuntimeHostSetupPackage {

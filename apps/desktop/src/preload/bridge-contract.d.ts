@@ -83,12 +83,11 @@ import type {
   OperationInput,
   OperationOutput,
 } from '@maka/runtime-host/protocol';
+import type { AgentGraphEpochDirectory } from '@maka/runtime-host/client';
 import type {
-  AgentGraphEpochDirectory,
-  RuntimeHostServiceManagementAction,
   RuntimeHostServiceManagementFrame,
   RuntimeHostSetupPhase,
-} from '@maka/runtime-host/client';
+} from '@maka/runtime-host/operator';
 import type {
   RendererRuntimeHostCommandOperation,
   RendererRuntimeHostQueryOperation,
@@ -225,6 +224,7 @@ export type AppUpdateInstallResult =
 
 export interface DesktopRuntimeHostProfileEntry {
   readonly profile: RuntimeHostProfile;
+  readonly managedService?: true;
   readonly enabled: boolean;
   readonly isDefault: boolean;
   readonly readiness: 'disabled' | 'connecting' | 'ready' | 'reconnecting' | 'unavailable';
@@ -338,7 +338,6 @@ export interface DesktopRuntimeHostOnboardingInput {
   readonly name?: string;
   readonly destination: string;
   readonly sshPort?: number;
-  readonly repairProfileId?: string;
 }
 
 export type DesktopRuntimeHostOnboardingPhase =
@@ -364,17 +363,25 @@ export type DesktopRuntimeHostOnboardingSnapshot =
       readonly profileId: string;
     };
 
-export type DesktopRuntimeHostManagementAction = Extract<
-  RuntimeHostServiceManagementAction,
-  'status' | 'start' | 'restart' | 'logs' | 'uninstall'
->;
+export type DesktopRuntimeHostManagementAction =
+  | 'status'
+  | 'start'
+  | 'restart'
+  | 'logs'
+  | 'repair'
+  | 'uninstall';
 
 export type DesktopRuntimeHostManagementResult = Extract<
   RuntimeHostServiceManagementFrame,
   { kind: 'result' }
 >;
 
-export type DesktopRuntimeHostManagementResponse = RuntimeHostServiceManagementFrame;
+export type DesktopRuntimeHostManagementResponse =
+  | RuntimeHostServiceManagementFrame
+  | {
+      readonly kind: 'uninstalled';
+      readonly retainedStateRoot: string;
+    };
 
 export interface DesktopProjectCapabilities {
   readonly chooseClientDirectory: boolean;
