@@ -1,7 +1,7 @@
 import { failureClassFromCompleteStopReason, type SessionEvent } from '@maka/core/events';
 import { findProjectByIdentity } from '@maka/core/project';
 import { type StoredMessage } from '@maka/core/session';
-import type { CreateSessionInput, UserMessageInput } from '@maka/core/runtime-inputs';
+import type { UserMessageInput } from '@maka/core/runtime-inputs';
 import type { ExecutionBoundaryReadModel } from '@maka/core/sandbox-boundary';
 import type { SessionSummary } from '@maka/core/session';
 import {
@@ -31,7 +31,7 @@ import {
   runtimeHostSessionSummary,
   type RuntimeHostMakaSessionDriver,
 } from './runtime-host-session-driver.js';
-import type { MakaPreparedSessionTurn } from './session-driver.js';
+import type { CreateSessionRequest, MakaPreparedSessionTurn } from './session-driver.js';
 import {
   formatRuntimeHostCliTaskBlockers,
   isRuntimeHostCliTaskBlocked,
@@ -150,7 +150,6 @@ export function createRuntimeHostRunContext(
     cwd: input.cwd,
     llmConnectionSlug: target.connection.slug,
     model: target.model,
-    permissionMode: 'ask',
     executionLocation:
       !input.hostProfileId || input.hostProfileId === 'local'
         ? { kind: 'client_path' }
@@ -273,7 +272,7 @@ class RuntimeHostRunRuntime implements MakaRunRuntime {
     );
   }
 
-  async createSession(input: CreateSessionInput): Promise<SessionSummary> {
+  async createSession(input: CreateSessionRequest): Promise<SessionSummary> {
     const created = await this.#driver.createSession(input);
     this.#sessionId = created.id;
     return created;

@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import type { CreateSessionInput } from '@maka/core/runtime-inputs';
 import { DEFAULT_SESSION_NAME } from '@maka/core/session-name';
 import {
   decodeStoredMessage,
@@ -14,7 +15,7 @@ import {
 } from '@maka/core/events';
 import type { OrchestrationMode } from '@maka/core/orchestration';
 import type { PermissionMode } from '@maka/core/permission';
-import type { CreateSessionInput } from '@maka/core/runtime-inputs';
+
 import { executionBoundaryDisplayMode } from '@maka/core/sandbox-boundary';
 import type { SandboxBoundaryResponse } from '@maka/core/sandbox-boundary';
 import type { ThinkingLevel } from '@maka/core/model-thinking';
@@ -58,6 +59,7 @@ import type {
   MakaSessionSwitchOptions,
   MakaSessionSwitchResult,
   MakaTranscriptReplacementReason,
+  CreateSessionRequest,
   RewindTarget,
   SessionResumeAvailability,
 } from './session-driver.js';
@@ -93,7 +95,7 @@ type RuntimeHostSessionDriverConnection = Pick<
 >;
 
 export interface RuntimeHostMakaSessionDriver extends MakaSessionDriver {
-  createSession(input: CreateSessionInput): Promise<SessionSummary>;
+  createSession(input: CreateSessionRequest): Promise<SessionSummary>;
   readMessages(): Promise<StoredMessage[]>;
   resumeLatest(): AsyncIterable<SessionEvent>;
   subscribePendingInteractions(listener: (pending: InteractionPendingSnapshot) => void): () => void;
@@ -135,8 +137,14 @@ class RuntimeHostMakaSessionDriverImpl implements RuntimeHostMakaSessionDriver {
   // elevations (the picker, a resumed Session's boundary) update
   // `#permissionMode` only; `startNewSession` falls back to this so Full
   // access never leaks into a fresh Session (#3020).
-  readonly #defaultPermissionMode: PermissionMode;
-  #permissionMode: PermissionMode;
+  //
+  // `undefined` means the client has no claim on the starting mode and the
+  // Host resolves it from its Runtime Policy `chatDefaults`. That is a
+  // stronger guarantee than the old literal `ask`, not a weaker one: a
+  // fresh Session cannot inherit the previous one's elevation either way,
+  // and the mode it does start in is now the configured one.
+  readonly #defaultPermissionMode: PermissionMode | undefined;
+  #permissionMode: PermissionMode | undefined;
   #activeBoundaryDisplayMode: PermissionMode | undefined;
   #orchestrationMode: OrchestrationMode;
   #channel: RuntimeHostSessionChannel | undefined;
@@ -179,7 +187,7 @@ class RuntimeHostMakaSessionDriverImpl implements RuntimeHostMakaSessionDriver {
     };
     this.#model = input.model;
     this.#llmConnectionSlug = input.llmConnectionSlug;
-    this.#defaultPermissionMode = input.permissionMode ?? 'ask';
+    this.#defaultPermissionMode = input.permissionMode;
     this.#permissionMode = this.#defaultPermissionMode;
     this.#orchestrationMode = input.orchestrationMode ?? 'default';
   }
@@ -188,7 +196,7 @@ class RuntimeHostMakaSessionDriverImpl implements RuntimeHostMakaSessionDriver {
     return loadCurrentMessages(this.#connection, this.#requireSession('read messages'));
   }
 
-  async createSession(input: CreateSessionInput): Promise<SessionSummary> {
+  async createSession(input: CreateSessionRequest): Promise<SessionSummary> {
     if (this.#sessionId) throw new Error('Cannot create a Session while another is active.');
     if (!input.model) throw new Error('Runtime Host Session creation requires an explicit model');
     this.#workspace = {
@@ -198,7 +206,10 @@ class RuntimeHostMakaSessionDriverImpl implements RuntimeHostMakaSessionDriver {
     this.#llmConnectionSlug = input.llmConnectionSlug;
     this.#model = input.model;
     this.#thinkingLevel = input.thinkingLevel;
-    this.#permissionMode = input.permissionMode ?? 'ask';
+    // An omitted mode stays omitted: the Host applies its configured default.
+    // Substituting a literal `ask` here would make the CLI a second authority
+    // over the starting boundary and silently override that default.
+    this.#permissionMode = input.permissionMode ?? this.#defaultPermissionMode;
     const session = await this.#createSession(input.name ?? DEFAULT_SESSION_NAME);
     return runtimeHostSessionSummary(session);
   }
@@ -718,7 +729,7 @@ class RuntimeHostMakaSessionDriverImpl implements RuntimeHostMakaSessionDriver {
     return this.#orchestrationMode;
   }
 
-  getPermissionMode(): PermissionMode {
+  getPermissionMode(): PermissionMode | undefined {
     return this.#activeBoundaryDisplayMode ?? this.#permissionMode;
   }
 
@@ -743,7 +754,7 @@ class RuntimeHostMakaSessionDriverImpl implements RuntimeHostMakaSessionDriver {
           connectionSlug: this.#llmConnectionSlug,
           model: this.#model,
         },
-        permissionMode: this.#permissionMode,
+        ...(this.#permissionMode === undefined ? {} : { permissionMode: this.#permissionMode }),
         ...(this.#orchestrationMode === 'default'
           ? {}
           : { orchestrationMode: this.#orchestrationMode }),
