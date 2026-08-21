@@ -3,6 +3,7 @@ import { resolve } from 'node:path';
 import {
   compareScheduledTasksForList,
   computeNextFireAt,
+  decodePersistedScheduledTask,
   isScheduledTaskDue,
   nextScheduledTaskStateAfterFire,
   normalizeCreateScheduledTaskInput,
@@ -577,7 +578,7 @@ class SqliteScheduledTaskStore implements ScheduledTaskStore {
       if (typeof row.record_json !== 'string') {
         throw new Error(`Invalid scheduled task at row ${index + 1}`);
       }
-      return JSON.parse(row.record_json) as ScheduledTask;
+      return decodePersistedScheduledTask(JSON.parse(row.record_json) as ScheduledTask);
     });
     const claimRows = this.#lease.database
       .prepare(`
