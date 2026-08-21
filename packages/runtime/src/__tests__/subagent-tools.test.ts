@@ -894,7 +894,7 @@ describe('subagent tools', () => {
             turnId: 'child-turn',
             runId: 'child-run',
             status: 'completed',
-            permissionMode: 'execute',
+            permissionMode: 'ask',
             summary: 'done',
             artifactIds: [],
           };

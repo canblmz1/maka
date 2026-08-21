@@ -489,7 +489,7 @@ function sessionInput() {
     backend: 'fake' as const,
     llmConnectionSlug: 'fixture',
     model: 'fixture-model',
-    permissionMode: 'execute' as const,
+    permissionMode: 'ask' as const,
     name: 'Selected',
   };
 }

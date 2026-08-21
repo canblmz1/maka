@@ -99,11 +99,22 @@ describe('Runtime Host bootstrap protocol', () => {
   });
 
   test('publishes a new compatibility epoch for sandbox failure results', () => {
+    // Epoch 32 rejects the bounded sandbox failure reason on live tool results,
+    // so mixed-version peers must fail the handshake. Asserted as a floor, like
+    // the epochs above: pinning an exact value breaks on every later bump.
     assert.ok(RUNTIME_HOST_COMPATIBILITY_EPOCH > 32);
   });
 
   test('publishes a new compatibility epoch for backend-free ScheduledTask templates', () => {
-    assert.equal(RUNTIME_HOST_COMPATIBILITY_EPOCH, 34);
+    // Epoch 33 Clients require the `backend` field these templates no longer
+    // emit. Also a floor, for the same reason as above.
+    assert.ok(RUNTIME_HOST_COMPATIBILITY_EPOCH > 33);
+  });
+
+  test('publishes a new compatibility epoch for the retired execute permission mode', () => {
+    // Epoch 34 still speaks `execute`. Frame decoders now reject it, so such a
+    // peer would fail mid-Session rather than at connect.
+    assert.ok(RUNTIME_HOST_COMPATIBILITY_EPOCH > 34);
   });
 
   test('selects the highest mutually supported protocol and rejects a gap', () => {

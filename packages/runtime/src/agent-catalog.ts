@@ -153,7 +153,7 @@ export const WEB_RESEARCH_AGENT_DEFINITION: AgentDefinition = {
     defaultWriteBack: AGENT_WRITE_BACK_SUMMARY,
     supportedWriteBack: [AGENT_WRITE_BACK_SUMMARY],
   },
-  permissionMode: 'execute',
+  permissionMode: 'ask',
   tools: ['WebSearch'],
   systemPrompt: [
     'You are a foreground web-research child agent.',
@@ -178,7 +178,7 @@ export const IMPLEMENTATION_AGENT_DEFINITION: AgentDefinition = {
     defaultWriteBack: AGENT_WRITE_BACK_PATCH,
     supportedWriteBack: [AGENT_WRITE_BACK_PATCH],
   },
-  permissionMode: 'execute',
+  permissionMode: 'ask',
   tools: [
     'Read',
     'Glob',

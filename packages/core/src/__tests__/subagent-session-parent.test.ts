@@ -11,7 +11,6 @@ import {
   projectLinkedSessionTree,
   subagentSessionRuntimeSummary,
 } from '../session.js';
-import { isPermissionModeWithinCeiling } from '../permission.js';
 
 const relation: SubagentSessionParent = {
   kind: 'subagent',
