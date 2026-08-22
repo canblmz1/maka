@@ -22,6 +22,10 @@ on:
     branches: [main]
     paths:
       - .github/workflows/pr-3434-dependency-ownership-fix.yml
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/pr-3434-helper-trigger
 
 permissions:
   contents: write
@@ -91,31 +95,51 @@ jobs:
            *
            * Why this exists: `settleModelStepOutcome` (model-adapter.ts) classifies a
            * step as `{ kind: 'completed' }` for `finishReason: "length"` — the same
-           * branch `"stop"` and `"tool-calls"` take. That classification is correct
-           * for continuation/retry bookkeeping and is deliberately not reused as an
-           * irreversible tool-execution gate.
+           * branch `"stop"` and `"tool-calls"` take. `ai-sdk-backend.ts` historically
+           * used only that broader outcome before settling `returnedToolCalls`, so a
+           * step that streamed a structurally complete tool call and was then cut off
+           * by a token limit while producing more content could still execute that
+           * call. The `length -> completed` classification is correct for that
+           * function's continuation/retry bookkeeping purpose; it is deliberately not
+           * reused as an irreversible tool-execution gate here.
            *
-           * The second boundary is payload authority. The AI SDK's final `tool-call`
-           * input is already parsed/post-processed data and may have passed through
-           * repair/coercion. Where a provider emitted raw `tool-input-delta` text, the
-           * bytes that actually streamed are the stronger evidence. This module keeps
-           * those bytes per physical request, requires a matching start/end pair and a
-           * positively safe terminal reason, parses only the captured raw JSON, and
-           * returns that parsed value as the execution authority.
+           * There is a second, independent boundary: `translateChunk` receives the AI
+           * SDK's final `tool-call.input` only after the SDK's repair/coercion path may
+           * have transformed it. Where the provider exposes raw `tool-input-delta`
+           * chunks, those bytes are stronger evidence of what actually streamed. This
+           * tracker observes the raw SDK chunks verbatim before translation, keeps the
+           * argument bytes per physical provider request, requires matching start/end
+           * evidence plus a positively safe request termination, and parses only the
+           * captured raw JSON. That parsed value and the raw-stream tool name become the
+           * execution authority; the SDK's post-hoc projection is never substituted for
+           * a call that had raw evidence.
            *
-           * Not every provider streams argument bytes incrementally. A legitimate
-           * atomic-delivery request can emit `tool-input-start`, `tool-input-end`, and
-           * then a resolved `tool-call` without a single delta. Such a call has no raw
-           * completeness evidence, so it is intentionally absent from `decisions`.
-           * The caller may use the narrow step-level fallback only when
-           * `hadRawArgumentEvidence` is false for the WHOLE physical request. Once any
-           * call in a request streamed real bytes, another call's missing decision is
-           * indistinguishable from an id mismatch and must fail closed.
+           * Not every real provider integration streams argument bytes incrementally.
+           * This project's Anthropic-compatible protocol, covered by the real HTTP
+           * round-trip in `computer-use-provider-protocol.test.ts`, can emit
+           * `tool-input-start`, immediately `tool-input-end`, and then `tool-call`, with
+           * zero argument delta chunks between them. That is legitimate atomic delivery,
+           * not a truncated byte stream. Such a call has no raw completeness evidence,
+           * so it is intentionally absent from `decisions` rather than being called safe.
            *
-           * Concurrency is request-scoped by construction: every
-           * `createToolCallSafetyTracker()` owns its maps and terminal state. Provider
-           * ids such as `call_1` can therefore be reused by concurrent requests without
-           * cross-resolution.
+           * The atomic fallback is request-scoped, not call-scoped. A caller may treat a
+           * missing decision as genuinely atomic only when `hadRawArgumentEvidence` is
+           * false for the WHOLE physical request. The moment any sibling call streamed
+           * real bytes, another call's missing decision is indistinguishable from an id
+           * mismatch between this tracker and the SDK's resolved call and must fail
+           * closed.
+           *
+           * Concurrency note: nothing here is shared across requests or stored beyond
+           * one `ModelAdapter.startStream` result. `createToolCallSafetyTracker()` owns
+           * fresh maps and terminal state every time, so concurrent provider requests
+           * may both use a provider-issued id such as `call_1` without observing or
+           * resolving each other's evidence.
+           *
+           * `isSafeToolExecutionStepOutcome` below is only the all-atomic fallback. It
+           * is deliberately narrower than `settleModelStepOutcome`'s own
+           * `kind === 'completed'`: only `stop` and `tool-calls` are execution-safe;
+           * `length`, content filtering, provider errors, aborts, unknown reasons, and a
+           * stream with no terminal event all fail closed.
            */
           import type {
             ModelStepOutcome,
@@ -124,7 +148,6 @@ jobs:
           } from './model-protocol.js';
 
           interface RawToolCallState {
-            readonly id: string;
             name?: string;
             raw: string;
             started: boolean;
@@ -135,7 +158,6 @@ jobs:
           type TerminalState = 'pending' | 'safe' | 'unsafe';
 
           export interface ToolCallSafetyTracker {
-            /** Per-id raw argument state for this physical provider request only. */
             readonly calls: Map<string, RawToolCallState>;
             /** ids that received at least one non-empty tool-input-delta chunk. */
             readonly idsWithRawDelta: Set<string>;
@@ -152,7 +174,7 @@ jobs:
           function callState(tracker: ToolCallSafetyTracker, id: string): RawToolCallState {
             let state = tracker.calls.get(id);
             if (state === undefined) {
-              state = { id, raw: '', started: false, ended: false, invalid: false };
+              state = { raw: '', started: false, ended: false, invalid: false };
               tracker.calls.set(id, state);
             }
             return state;
@@ -180,11 +202,7 @@ jobs:
 
           /** Starts tracking one physical provider request's raw stream. */
           export function createToolCallSafetyTracker(): ToolCallSafetyTracker {
-            return {
-              calls: new Map(),
-              idsWithRawDelta: new Set(),
-              terminal: 'pending',
-            };
+            return { calls: new Map(), idsWithRawDelta: new Set(), terminal: 'pending' };
           }
 
           /** Feed one raw AI SDK stream chunk through, unchanged, as observed. */
@@ -199,12 +217,21 @@ jobs:
               finishReason?: unknown;
             };
 
+            const isToolEvidence =
+              part.type === 'tool-input-start' ||
+              part.type === 'tool-input-delta' ||
+              part.type === 'tool-input-end' ||
+              part.type === 'tool-error';
+            if (tracker.terminal !== 'pending' && isToolEvidence) {
+              tracker.terminal = 'unsafe';
+            }
+
             switch (part.type) {
               case 'tool-input-start': {
                 const id = toolPartId(part);
                 if (id === undefined) return;
                 const state = callState(tracker, id);
-                if (state.started) state.invalid = true;
+                if (state.started || state.ended || state.raw.length > 0) state.invalid = true;
                 state.started = true;
                 if (typeof part.toolName === 'string' && part.toolName.length > 0) {
                   if (state.name !== undefined && state.name !== part.toolName) state.invalid = true;
@@ -218,7 +245,7 @@ jobs:
                   return;
                 }
                 const state = callState(tracker, id);
-                if (state.ended) state.invalid = true;
+                if (!state.started || state.ended) state.invalid = true;
                 state.raw += part.delta;
                 tracker.idsWithRawDelta.add(id);
                 return;
@@ -227,7 +254,7 @@ jobs:
                 const id = toolPartId(part);
                 if (id === undefined) return;
                 const state = callState(tracker, id);
-                if (state.ended) state.invalid = true;
+                if (!state.started || state.ended) state.invalid = true;
                 state.ended = true;
                 return;
               }
@@ -255,29 +282,22 @@ jobs:
           }
 
           /**
-           * Resolves all calls that actually streamed raw bytes. A safe decision needs
-           * every piece of positive evidence: start, non-empty raw bytes, end, a tool
-           * name from the raw stream, valid JSON decoded from those exact bytes, and a
-           * normal `stop`/`tool-calls` request termination. Missing or contradictory
-           * evidence fails closed.
+           * Resolve only calls that actually streamed raw bytes. Positive execution
+           * requires start + non-empty deltas + end + raw-stream tool name + valid JSON
+           * decoded from exactly those bytes + an observed normal request termination.
+           * The optional metadata cannot promote a stream with no terminal event to safe.
            */
           export function resolveToolCallSafety(
             tracker: ToolCallSafetyTracker,
-            meta?: { providerReason?: string },
+            _meta?: { providerReason?: string },
           ): ToolCallExecutionSafety {
             if (tracker.resolved !== undefined) return tracker.resolved;
 
-            const fallbackReason = normalizedFinishReason(meta?.providerReason);
-            const terminalSafe =
-              tracker.terminal === 'safe' ||
-              (tracker.terminal === 'pending' &&
-                (fallbackReason === 'stop' || fallbackReason === 'tool-calls'));
             const decisions = new Map<string, ToolCallSafetyDecision>();
-
             for (const id of tracker.idsWithRawDelta) {
               const state = tracker.calls.get(id);
               if (
-                !terminalSafe ||
+                tracker.terminal !== 'safe' ||
                 state === undefined ||
                 !state.started ||
                 !state.ended ||
@@ -304,11 +324,9 @@ jobs:
           }
 
           /**
-           * Atomic-delivery fallback: only an unambiguous normal completion may execute
-           * a call for which the request carried no raw argument bytes at all. This is
-           * deliberately narrower than `settleModelStepOutcome`'s own
-           * `kind === 'completed'`, which also covers `finishReason: "length"` for its
-           * continuation/retry bookkeeping purpose.
+           * Whether an all-atomic provider step's own termination is execution-safe.
+           * Only an unambiguous normal completion qualifies. `length` is intentionally
+           * excluded even though `settleModelStepOutcome` classifies it as completed.
            */
           export function isSafeToolExecutionStepOutcome(outcome: ModelStepOutcome): boolean {
             return (
