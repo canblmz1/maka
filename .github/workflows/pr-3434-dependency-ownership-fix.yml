@@ -1,0 +1,417 @@
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+
+name: PR 3434 dependency ownership fix
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/pr-3434-dependency-ownership-fix.yml
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/tool-execution-integrity
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.18.1
+          cache: npm
+
+      - name: Rebase the PR tree onto current upstream main without carrying the external dependency
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'canblmz1'
+          git config user.email '116688414+canblmz1@users.noreply.github.com'
+          git remote add upstream https://github.com/apache/maka.git || true
+          git fetch upstream main
+
+          old_head="$(git rev-parse HEAD)"
+          merge_base="$(git merge-base "$old_head" upstream/main)"
+          echo "old_head=$old_head" >> "$GITHUB_ENV"
+
+          targets=(
+            packages/runtime/src/__tests__/ai-sdk-backend.test.ts
+            packages/runtime/src/__tests__/length-cutoff-tool-execution-repro.test.ts
+            packages/runtime/src/__tests__/tool-call-execution-guard.test.ts
+            packages/runtime/src/ai-sdk-backend.ts
+            packages/runtime/src/model-adapter.ts
+            packages/runtime/src/model-protocol.ts
+            packages/runtime/src/tool-call-execution-guard.ts
+          )
+
+          # Since this PR's base, upstream touched these surfaces only in the
+          # repository-wide ASF source-header sweep. Refuse to overwrite any
+          # later substantive change instead of silently carrying an old copy.
+          unexpected="$(git log --format='%H' "$merge_base"..upstream/main -- "${targets[@]}" | grep -v '^c633ea5b2524d9463228e01f8d369ef9166c3f05$' || true)"
+          if [[ -n "$unexpected" ]]; then
+            echo "Unexpected upstream commits touched PR target files:" >&2
+            echo "$unexpected" >&2
+            exit 1
+          fi
+
+          git reset --hard upstream/main
+          git checkout "$old_head" -- "${targets[@]}"
+
+      - name: Replace the external package gate with a Maka-owned request-scoped guard
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > packages/runtime/src/tool-call-execution-guard.ts <<'EOF'
+          /**
+           * tool-call-execution-guard.ts — positive-completion proof for a provider
+           * step's tool calls before `ai-sdk-backend.ts` settles them through
+           * `ToolRuntime` (real side effects: filesystem writes, shell commands,
+           * apply_patch, SQL execution, dependency installs, and so on).
+           *
+           * Why this exists: `settleModelStepOutcome` (model-adapter.ts) classifies a
+           * step as `{ kind: 'completed' }` for `finishReason: "length"` — the same
+           * branch `"stop"` and `"tool-calls"` take. That classification is correct
+           * for continuation/retry bookkeeping and is deliberately not reused as an
+           * irreversible tool-execution gate.
+           *
+           * The second boundary is payload authority. The AI SDK's final `tool-call`
+           * input is already parsed/post-processed data and may have passed through
+           * repair/coercion. Where a provider emitted raw `tool-input-delta` text, the
+           * bytes that actually streamed are the stronger evidence. This module keeps
+           * those bytes per physical request, requires a matching start/end pair and a
+           * positively safe terminal reason, parses only the captured raw JSON, and
+           * returns that parsed value as the execution authority.
+           *
+           * Not every provider streams argument bytes incrementally. A legitimate
+           * atomic-delivery request can emit `tool-input-start`, `tool-input-end`, and
+           * then a resolved `tool-call` without a single delta. Such a call has no raw
+           * completeness evidence, so it is intentionally absent from `decisions`.
+           * The caller may use the narrow step-level fallback only when
+           * `hadRawArgumentEvidence` is false for the WHOLE physical request. Once any
+           * call in a request streamed real bytes, another call's missing decision is
+           * indistinguishable from an id mismatch and must fail closed.
+           *
+           * Concurrency is request-scoped by construction: every
+           * `createToolCallSafetyTracker()` owns its maps and terminal state. Provider
+           * ids such as `call_1` can therefore be reused by concurrent requests without
+           * cross-resolution.
+           */
+          import type {
+            ModelStepOutcome,
+            ToolCallExecutionSafety,
+            ToolCallSafetyDecision,
+          } from './model-protocol.js';
+
+          interface RawToolCallState {
+            readonly id: string;
+            name?: string;
+            raw: string;
+            started: boolean;
+            ended: boolean;
+            invalid: boolean;
+          }
+
+          type TerminalState = 'pending' | 'safe' | 'unsafe';
+
+          export interface ToolCallSafetyTracker {
+            /** Per-id raw argument state for this physical provider request only. */
+            readonly calls: Map<string, RawToolCallState>;
+            /** ids that received at least one non-empty tool-input-delta chunk. */
+            readonly idsWithRawDelta: Set<string>;
+            terminal: TerminalState;
+            resolved?: ToolCallExecutionSafety;
+          }
+
+          function toolPartId(part: { id?: unknown; toolCallId?: unknown }): string | undefined {
+            if (typeof part.id === 'string') return part.id;
+            if (typeof part.toolCallId === 'string') return part.toolCallId;
+            return undefined;
+          }
+
+          function callState(tracker: ToolCallSafetyTracker, id: string): RawToolCallState {
+            let state = tracker.calls.get(id);
+            if (state === undefined) {
+              state = { id, raw: '', started: false, ended: false, invalid: false };
+              tracker.calls.set(id, state);
+            }
+            return state;
+          }
+
+          function normalizedFinishReason(value: unknown): string | undefined {
+            if (typeof value === 'string') return value;
+            if (
+              value !== null &&
+              typeof value === 'object' &&
+              typeof (value as { unified?: unknown }).unified === 'string'
+            ) {
+              return (value as { unified: string }).unified;
+            }
+            return undefined;
+          }
+
+          function markTerminal(tracker: ToolCallSafetyTracker, safe: boolean): void {
+            if (!safe || tracker.terminal === 'unsafe') {
+              tracker.terminal = 'unsafe';
+              return;
+            }
+            tracker.terminal = 'safe';
+          }
+
+          /** Starts tracking one physical provider request's raw stream. */
+          export function createToolCallSafetyTracker(): ToolCallSafetyTracker {
+            return {
+              calls: new Map(),
+              idsWithRawDelta: new Set(),
+              terminal: 'pending',
+            };
+          }
+
+          /** Feed one raw AI SDK stream chunk through, unchanged, as observed. */
+          export function observeRawChunk(tracker: ToolCallSafetyTracker, chunk: unknown): void {
+            if (chunk === null || typeof chunk !== 'object') return;
+            const part = chunk as {
+              type?: unknown;
+              id?: unknown;
+              toolCallId?: unknown;
+              toolName?: unknown;
+              delta?: unknown;
+              finishReason?: unknown;
+            };
+
+            switch (part.type) {
+              case 'tool-input-start': {
+                const id = toolPartId(part);
+                if (id === undefined) return;
+                const state = callState(tracker, id);
+                if (state.started) state.invalid = true;
+                state.started = true;
+                if (typeof part.toolName === 'string' && part.toolName.length > 0) {
+                  if (state.name !== undefined && state.name !== part.toolName) state.invalid = true;
+                  state.name = part.toolName;
+                }
+                return;
+              }
+              case 'tool-input-delta': {
+                const id = toolPartId(part);
+                if (id === undefined || typeof part.delta !== 'string' || part.delta.length === 0) {
+                  return;
+                }
+                const state = callState(tracker, id);
+                if (state.ended) state.invalid = true;
+                state.raw += part.delta;
+                tracker.idsWithRawDelta.add(id);
+                return;
+              }
+              case 'tool-input-end': {
+                const id = toolPartId(part);
+                if (id === undefined) return;
+                const state = callState(tracker, id);
+                if (state.ended) state.invalid = true;
+                state.ended = true;
+                return;
+              }
+              case 'tool-error': {
+                const id = toolPartId(part);
+                if (id !== undefined) callState(tracker, id).invalid = true;
+                return;
+              }
+              case 'finish': {
+                const reason = normalizedFinishReason(part.finishReason);
+                markTerminal(tracker, reason === 'stop' || reason === 'tool-calls');
+                return;
+              }
+              case 'error':
+              case 'abort':
+                markTerminal(tracker, false);
+                return;
+              default:
+                return;
+            }
+          }
+
+          function rejectedDecision(): ToolCallSafetyDecision {
+            return { action: 'reject' };
+          }
+
+          /**
+           * Resolves all calls that actually streamed raw bytes. A safe decision needs
+           * every piece of positive evidence: start, non-empty raw bytes, end, a tool
+           * name from the raw stream, valid JSON decoded from those exact bytes, and a
+           * normal `stop`/`tool-calls` request termination. Missing or contradictory
+           * evidence fails closed.
+           */
+          export function resolveToolCallSafety(
+            tracker: ToolCallSafetyTracker,
+            meta?: { providerReason?: string },
+          ): ToolCallExecutionSafety {
+            if (tracker.resolved !== undefined) return tracker.resolved;
+
+            const fallbackReason = normalizedFinishReason(meta?.providerReason);
+            const terminalSafe =
+              tracker.terminal === 'safe' ||
+              (tracker.terminal === 'pending' &&
+                (fallbackReason === 'stop' || fallbackReason === 'tool-calls'));
+            const decisions = new Map<string, ToolCallSafetyDecision>();
+
+            for (const id of tracker.idsWithRawDelta) {
+              const state = tracker.calls.get(id);
+              if (
+                !terminalSafe ||
+                state === undefined ||
+                !state.started ||
+                !state.ended ||
+                state.invalid ||
+                state.name === undefined
+              ) {
+                decisions.set(id, rejectedDecision());
+                continue;
+              }
+
+              try {
+                const value: unknown = JSON.parse(state.raw);
+                decisions.set(id, { action: 'execute', name: state.name, value });
+              } catch {
+                decisions.set(id, rejectedDecision());
+              }
+            }
+
+            tracker.resolved = {
+              hadRawArgumentEvidence: tracker.idsWithRawDelta.size > 0,
+              decisions,
+            };
+            return tracker.resolved;
+          }
+
+          /**
+           * Atomic-delivery fallback: only an unambiguous normal completion may execute
+           * a call for which the request carried no raw argument bytes at all. This is
+           * deliberately narrower than `settleModelStepOutcome`'s own
+           * `kind === 'completed'`, which also covers `finishReason: "length"` for its
+           * continuation/retry bookkeeping purpose.
+           */
+          export function isSafeToolExecutionStepOutcome(outcome: ModelStepOutcome): boolean {
+            return (
+              outcome.kind === 'completed' &&
+              (outcome.finishReason === 'stop' || outcome.finishReason === 'tool-calls')
+            );
+          }
+          EOF
+
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('packages/runtime/src/__tests__/length-cutoff-tool-execution-repro.test.ts')
+          s = p.read_text()
+          s = s.replace(
+              'There is no raw byte stream here for\n * prefix-safe-json to verify; tool-call-execution-guard.ts falls back to',
+              'There is no raw byte stream here for\n * the request-scoped raw-byte tracker to verify; tool-call-execution-guard.ts falls back to',
+          )
+          p.write_text(s)
+          PY
+
+          npm run write:asf-headers
+
+      - name: Install and validate
+        shell: bash
+        env:
+          ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+        run: |
+          set -euo pipefail
+          npm ci --ignore-scripts
+          node scripts/apply-dependency-patches.mjs
+
+          ./node_modules/.bin/biome format --write \
+            packages/runtime/src/__tests__/ai-sdk-backend.test.ts \
+            packages/runtime/src/__tests__/length-cutoff-tool-execution-repro.test.ts \
+            packages/runtime/src/__tests__/tool-call-execution-guard.test.ts \
+            packages/runtime/src/ai-sdk-backend.ts \
+            packages/runtime/src/model-adapter.ts \
+            packages/runtime/src/model-protocol.ts \
+            packages/runtime/src/tool-call-execution-guard.ts
+
+          npm run check:asf-headers
+          npm run check:third-party-notices
+          npm run check:cli-third-party-notices
+          npm run format:check
+          npm run lint
+
+          npm --workspace @maka/core run build
+          npm --workspace @maka/storage run build
+          npm --workspace @maka/mcp run build
+          npm --workspace @maka/runtime run build
+
+          node --test \
+            packages/runtime/dist/__tests__/tool-call-execution-guard.test.js \
+            packages/runtime/dist/__tests__/length-cutoff-tool-execution-repro.test.js \
+            packages/runtime/dist/__tests__/ai-sdk-backend.test.js
+
+      - name: Verify dependency removal and publish the rebased PR head
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if grep -R --line-number --fixed-strings 'prefix-safe-json' \
+            packages/runtime/package.json package-lock.json \
+            packages/cli/THIRD_PARTY_NOTICES.txt \
+            apps/desktop/resources/licenses/npm/THIRD_PARTY_NOTICES.txt \
+            scripts/generate-third-party-notices.mjs; then
+            echo 'prefix-safe-json still appears in dependency/release surfaces' >&2
+            exit 1
+          fi
+
+          allowed='^(packages/runtime/src/__tests__/ai-sdk-backend\.test\.ts|packages/runtime/src/__tests__/length-cutoff-tool-execution-repro\.test\.ts|packages/runtime/src/__tests__/tool-call-execution-guard\.test\.ts|packages/runtime/src/ai-sdk-backend\.ts|packages/runtime/src/model-adapter\.ts|packages/runtime/src/model-protocol\.ts|packages/runtime/src/tool-call-execution-guard\.ts)$'
+          unexpected="$(git diff --name-only | grep -Ev "$allowed" || true)"
+          if [[ -n "$unexpected" ]]; then
+            echo 'Unexpected changed files:' >&2
+            echo "$unexpected" >&2
+            exit 1
+          fi
+
+          git add \
+            packages/runtime/src/__tests__/ai-sdk-backend.test.ts \
+            packages/runtime/src/__tests__/length-cutoff-tool-execution-repro.test.ts \
+            packages/runtime/src/__tests__/tool-call-execution-guard.test.ts \
+            packages/runtime/src/ai-sdk-backend.ts \
+            packages/runtime/src/model-adapter.ts \
+            packages/runtime/src/model-protocol.ts \
+            packages/runtime/src/tool-call-execution-guard.ts
+
+          git commit -m 'fix(runtime): internalize tool execution safety gate'
+          new_head="$(git rev-parse HEAD)"
+          echo "new_head=$new_head" >> "$GITHUB_ENV"
+          git push --force-with-lease=refs/heads/fix/tool-execution-integrity:${old_head} \
+            origin HEAD:refs/heads/fix/tool-execution-integrity
+
+      - name: Summary
+        shell: bash
+        run: |
+          {
+            echo '### PR #3434 dependency ownership fix'
+            echo
+            echo "- old head: \`${old_head}\`"
+            echo "- new head: \`${new_head}\`"
+            echo '- rebased on current apache/maka main'
+            echo '- removed prefix-safe-json from runtime/package-lock/notices'
+            echo '- replaced it with a Maka-owned request-scoped raw-byte execution guard'
+            echo '- ASF header, notice, format, lint, build, and targeted runtime tests passed'
+          } >> "$GITHUB_STEP_SUMMARY"
