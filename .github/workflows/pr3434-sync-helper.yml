@@ -73,6 +73,9 @@ jobs:
       - name: Install dependencies with repository patches
         run: npm ci
 
+      - name: Format compatibility edit
+        run: npx biome format --write packages/runtime/src/__tests__/length-cutoff-tool-execution-repro.test.ts
+
       - name: Build runtime prerequisites
         run: |
           npm run build --workspace @maka/core
@@ -87,11 +90,11 @@ jobs:
       - name: Focused tool-execution safety suites
         run: |
           node --test \
-            packages/runtime/src/__tests__/tool-call-execution-guard.test.ts \
-            packages/runtime/src/__tests__/tool-args-violation.test.ts \
-            packages/runtime/src/__tests__/length-cutoff-tool-execution-repro.test.ts \
-            packages/runtime/src/__tests__/deferred-guard.test.ts
-          node --test packages/runtime/src/__tests__/ai-sdk-backend.test.ts
+            packages/runtime/dist/__tests__/tool-call-execution-guard.test.js \
+            packages/runtime/dist/__tests__/tool-args-violation.test.js \
+            packages/runtime/dist/__tests__/length-cutoff-tool-execution-repro.test.js \
+            packages/runtime/dist/__tests__/deferred-guard.test.js
+          node --test packages/runtime/dist/__tests__/ai-sdk-backend.test.js
 
       - name: Diff hygiene
         run: |
