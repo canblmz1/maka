@@ -1,0 +1,72 @@
+name: PR 3434 one-shot main sync
+
+on:
+  push:
+    branches:
+      - pr3434-sync-helper-20260903
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    if: github.repository == 'canblmz1/maka'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout helper payload
+        uses: actions/checkout@v4
+        with:
+          ref: pr3434-sync-helper-20260903
+          path: helper
+          fetch-depth: 1
+
+      - name: Checkout PR branch
+        uses: actions/checkout@v4
+        with:
+          ref: fix/tool-execution-integrity
+          path: target
+          fetch-depth: 0
+
+      - name: Merge pinned apache/main and resolve reviewed runtime conflicts
+        working-directory: target
+        env:
+          UPSTREAM_MAIN_SHA: 01fe14bd271c38d65e82ce58d1448b10a5844a46
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git remote add upstream https://github.com/apache/maka.git 2>/dev/null || true
+          git fetch upstream "$UPSTREAM_MAIN_SHA"
+
+          set +e
+          git merge --no-ff --no-commit "$UPSTREAM_MAIN_SHA"
+          merge_status=$?
+          set -e
+
+          if [ "$merge_status" -ne 0 ]; then
+            mapfile -t conflicts < <(git diff --name-only --diff-filter=U)
+            printf 'Conflicts detected:\n%s\n' "${conflicts[*]}"
+            for path in "${conflicts[@]}"; do
+              case "$path" in
+                packages/runtime/src/ai-sdk-backend.ts|packages/runtime/src/model-adapter.ts) ;;
+                *) echo "Unexpected conflict: $path" >&2; exit 1 ;;
+              esac
+            done
+            [ "${#conflicts[@]}" -eq 2 ] || { echo 'Expected exactly the two reviewed runtime conflicts.' >&2; exit 1; }
+            git checkout --theirs -- packages/runtime/src/ai-sdk-backend.ts packages/runtime/src/model-adapter.ts
+          fi
+
+          python ../helper/.github/pr3434-resolve.py
+          git add packages/runtime/src/ai-sdk-backend.ts packages/runtime/src/model-adapter.ts
+
+          if git diff --name-only --diff-filter=U | grep -q .; then
+            echo 'Unresolved conflicts remain.' >&2
+            git diff --name-only --diff-filter=U >&2
+            exit 1
+          fi
+
+          git diff --check --cached
+          git status --short
+          git commit -m 'chore: merge current main and resolve runtime conflicts'
+          git push origin HEAD:fix/tool-execution-integrity
