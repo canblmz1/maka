@@ -27,10 +27,11 @@ jobs:
           path: target
           fetch-depth: 0
 
-      - name: Resolve pinned-main runtime conflicts and prove mergeability
+      - name: Build resolved merge tree and export it on staging branch
         working-directory: target
         env:
           UPSTREAM_MAIN_SHA: 01fe14bd271c38d65e82ce58d1448b10a5844a46
+          STAGING_BRANCH: pr3434-main-base-20260903
         shell: bash
         run: |
           set -euo pipefail
@@ -38,34 +39,55 @@ jobs:
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git remote add upstream https://github.com/apache/maka.git 2>/dev/null || true
           git fetch upstream "$UPSTREAM_MAIN_SHA"
+          git fetch origin "$STAGING_BRANCH"
 
-          # Only the two files conflict. Start them from current main, then
-          # reapply the reviewed PR behavior against current-main control flow.
-          # This keeps the branch patch narrow and avoids pushing unrelated
-          # upstream workflow-file changes with the Actions token.
-          git checkout "$UPSTREAM_MAIN_SHA" -- \
-            packages/runtime/src/ai-sdk-backend.ts \
-            packages/runtime/src/model-adapter.ts
-          python ../helper/.github/pr3434-resolve.py
-          git add packages/runtime/src/ai-sdk-backend.ts packages/runtime/src/model-adapter.ts
-
-          git diff --check "$UPSTREAM_MAIN_SHA" -- \
-            packages/runtime/src/ai-sdk-backend.ts \
-            packages/runtime/src/model-adapter.ts
-          git status --short
-          git commit -m 'chore: resolve current-main runtime conflicts'
-
-          # Prove the resulting branch now merges current main with zero
-          # conflicts before publishing the two-file resolution commit.
           set +e
           git merge --no-ff --no-commit "$UPSTREAM_MAIN_SHA"
           merge_status=$?
           set -e
+
           if [ "$merge_status" -ne 0 ]; then
-            echo 'Conflict-resolution commit did not fully eliminate merge conflicts.' >&2
+            mapfile -t conflicts < <(git diff --name-only --diff-filter=U)
+            printf 'Conflicts detected:\n%s\n' "${conflicts[*]}"
+            for path in "${conflicts[@]}"; do
+              case "$path" in
+                packages/runtime/src/ai-sdk-backend.ts|packages/runtime/src/model-adapter.ts) ;;
+                *) echo "Unexpected conflict: $path" >&2; exit 1 ;;
+              esac
+            done
+            [ "${#conflicts[@]}" -eq 2 ] || { echo 'Expected exactly the two reviewed runtime conflicts.' >&2; exit 1; }
+            git checkout --theirs -- packages/runtime/src/ai-sdk-backend.ts packages/runtime/src/model-adapter.ts
+          fi
+
+          python ../helper/.github/pr3434-resolve.py
+          git add packages/runtime/src/ai-sdk-backend.ts packages/runtime/src/model-adapter.ts
+
+          if git diff --name-only --diff-filter=U | grep -q .; then
+            echo 'Unresolved conflicts remain.' >&2
             git diff --name-only --diff-filter=U >&2
             exit 1
           fi
-          git merge --abort
 
-          git push origin HEAD:fix/tool-execution-integrity
+          git diff --check "$UPSTREAM_MAIN_SHA" -- packages/runtime/src/ai-sdk-backend.ts packages/runtime/src/model-adapter.ts
+          git commit -m 'chore: merge current main and resolve runtime conflicts'
+          MERGED_COMMIT=$(git rev-parse HEAD)
+
+          # Export only the resolved tree delta relative to current main onto a
+          # staging branch whose parent is exactly current main. The connector
+          # will then create the real two-parent merge commit from this tree.
+          mapfile -t changed < <(git diff --name-only "$UPSTREAM_MAIN_SHA" "$MERGED_COMMIT")
+          printf 'Resolved tree delta:\n%s\n' "${changed[*]}"
+          [ "${#changed[@]}" -gt 0 ] || { echo 'Resolved tree unexpectedly has no PR delta.' >&2; exit 1; }
+          for path in "${changed[@]}"; do
+            case "$path" in
+              packages/runtime/*) ;;
+              *) echo "Unexpected non-runtime path in resolved PR tree: $path" >&2; exit 1 ;;
+            esac
+          done
+
+          git checkout -B "$STAGING_BRANCH" "origin/$STAGING_BRANCH"
+          git checkout "$MERGED_COMMIT" -- "${changed[@]}"
+          git add -- "${changed[@]}"
+          git diff --check --cached
+          git commit -m 'chore: stage resolved PR 3434 merge tree'
+          git push origin HEAD:"$STAGING_BRANCH"
