@@ -25,6 +25,7 @@ jobs:
           set -euo pipefail
           python - <<'PY'
           from pathlib import Path
+          import re
 
           path = Path('packages/runtime/src/__tests__/length-cutoff-tool-execution-repro.test.ts')
           text = path.read_text()
@@ -42,35 +43,22 @@ jobs:
               raise SystemExit('expected exactly one stale mapper import block')
           text = text.replace(old_imports, new_imports, 1)
 
-          old_ctx = """  const ctx: InvocationContext = {
-            sessionId: 'session-1',
-            invocationId,
-            runId,
-            turnId,
-            source: 'desktop',
-            startedAt: 1,
-            request: {
-              sessionId: 'session-1',
-              turnId,
-              text,
-              source: 'desktop',
-              initialRuntimeEvent: anchor,
-            },
-            newId: idGenerator(),
-            now: monotonicClock(),
-          };
-          """
-          new_ctx = """  const ctx: RuntimeEventMapContext = {
+          pattern = re.compile(
+              r"  const ctx: InvocationContext = \{.*?\n  \};\n  return \{",
+              re.DOTALL,
+          )
+          replacement = """  const ctx: RuntimeEventMapContext = {
             sessionId: 'session-1',
             invocationId,
             runId,
             turnId,
             now: monotonicClock(),
           };
-          """
-          if text.count(old_ctx) != 1:
-              raise SystemExit('expected exactly one stale invocation context block')
-          text = text.replace(old_ctx, new_ctx, 1)
+          return {"""
+          text, count = pattern.subn(replacement, text, count=1)
+          if count != 1:
+              raise SystemExit(f'expected exactly one stale invocation context block, found {count}')
+
           path.write_text(text)
           PY
 
