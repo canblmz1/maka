@@ -66,7 +66,11 @@ jobs:
             exit 1
           fi
 
-          git diff --check --cached
+          # Current main legitimately contains whitespace-bearing generated/patch
+          # files outside this PR. Check only the two manually resolved files
+          # against the pinned upstream tree so unrelated upstream content cannot
+          # falsely block the merge.
+          git diff --check "$UPSTREAM_MAIN_SHA" -- packages/runtime/src/ai-sdk-backend.ts packages/runtime/src/model-adapter.ts
           git status --short
           git commit -m 'chore: merge current main and resolve runtime conflicts'
           git push origin HEAD:fix/tool-execution-integrity
