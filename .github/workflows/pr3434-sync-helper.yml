@@ -1,4 +1,4 @@
-name: PR 3434 resolved-head verification
+name: PR 3434 current-main adaptation and verification
 
 on:
   push:
@@ -6,7 +6,7 @@ on:
       - pr3434-sync-helper-20260903
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   verify:
@@ -18,6 +18,63 @@ jobs:
         with:
           ref: fix/tool-execution-integrity
           fetch-depth: 0
+
+      - name: Adapt stale repro harness imports to current main
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('packages/runtime/src/__tests__/length-cutoff-tool-execution-repro.test.ts')
+          text = path.read_text()
+
+          old_imports = """import { createSessionEventMapMemory, mapSessionEventToRuntimeEvent } from '../ai-sdk-flow.js';
+          import type { InvocationContext } from '../invocation-context.js';
+          """
+          new_imports = """import {
+            createSessionEventMapMemory,
+            mapSessionEventToRuntimeEvent,
+          } from '../session-event-runtime-mapper.js';
+          import type { RuntimeEventMapContext } from '../session-event-runtime-mapper.js';
+          """
+          if text.count(old_imports) != 1:
+              raise SystemExit('expected exactly one stale mapper import block')
+          text = text.replace(old_imports, new_imports, 1)
+
+          old_ctx = """  const ctx: InvocationContext = {
+            sessionId: 'session-1',
+            invocationId,
+            runId,
+            turnId,
+            source: 'desktop',
+            startedAt: 1,
+            request: {
+              sessionId: 'session-1',
+              turnId,
+              text,
+              source: 'desktop',
+              initialRuntimeEvent: anchor,
+            },
+            newId: idGenerator(),
+            now: monotonicClock(),
+          };
+          """
+          new_ctx = """  const ctx: RuntimeEventMapContext = {
+            sessionId: 'session-1',
+            invocationId,
+            runId,
+            turnId,
+            now: monotonicClock(),
+          };
+          """
+          if text.count(old_ctx) != 1:
+              raise SystemExit('expected exactly one stale invocation context block')
+          text = text.replace(old_ctx, new_ctx, 1)
+          path.write_text(text)
+          PY
+
+          git diff -- packages/runtime/src/__tests__/length-cutoff-tool-execution-repro.test.ts
 
       - name: Use repository Node version
         uses: actions/setup-node@v4
@@ -50,7 +107,7 @@ jobs:
 
       - name: Diff hygiene
         run: |
-          git diff --check 01fe14bd271c38d65e82ce58d1448b10a5844a46..HEAD
+          git diff --check 01fe14bd271c38d65e82ce58d1448b10a5844a46
           npx biome lint \
             packages/runtime/src/ai-sdk-backend.ts \
             packages/runtime/src/model-adapter.ts \
@@ -73,3 +130,17 @@ jobs:
             packages/runtime/src/__tests__/length-cutoff-tool-execution-repro.test.ts \
             packages/runtime/src/__tests__/tool-args-violation.test.ts \
             packages/runtime/src/__tests__/tool-call-execution-guard.test.ts
+
+      - name: Publish current-main compatibility fix
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add packages/runtime/src/__tests__/length-cutoff-tool-execution-repro.test.ts
+          if git diff --cached --quiet; then
+            echo 'No compatibility change to publish.'
+            exit 0
+          fi
+          git commit -m 'test(runtime): adapt execution repro to current mapper'
+          git push origin HEAD:fix/tool-execution-integrity
